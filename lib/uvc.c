@@ -439,6 +439,11 @@ int uvc_set_format(struct uvc_device *dev, struct v4l2_pix_format *format)
 	return v4l2_set_format(dev->vdev, format);
 }
 
+int uvc_set_frame_rate(struct uvc_device *dev, unsigned int fps)
+{
+	return v4l2_set_frame_rate(dev->vdev, fps)
+}
+
 struct v4l2_device *uvc_v4l2_device(struct uvc_device *dev)
 {
 	/*

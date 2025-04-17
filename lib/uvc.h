@@ -21,6 +21,7 @@ void uvc_close(struct uvc_device *dev);
 void uvc_events_init(struct uvc_device *dev, struct events *events);
 void uvc_set_config(struct uvc_device *dev, struct uvc_function_config *fc);
 int uvc_set_format(struct uvc_device *dev, struct v4l2_pix_format *format);
+int uvc_set_frame_rate(struct uvc_device *dev, unsigned int fps);
 struct v4l2_device *uvc_v4l2_device(struct uvc_device *dev);
 
 #endif /* __UVC_H__ */
