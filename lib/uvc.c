@@ -23,6 +23,10 @@
 #include "tools.h"
 #include "uvc.h"
 #include "v4l2.h"
+#include "servo-control.h"
+
+/* Custom control IDs for tracking CT controls */
+#define UVC_CTRL_CT_PANTILT_ABSOLUTE	0x1000
 
 struct uvc_device
 {
@@ -91,6 +95,36 @@ static const char *pu_control_name(uint8_t cs)
         return "UNKNOWN";
 }
 
+/* Camera Terminal Control names (using system header defines) */
+static const char *uvc_ct_control_names[] = {
+	[UVC_CT_CONTROL_UNDEFINED] = "UNDEFINED",
+	[UVC_CT_SCANNING_MODE_CONTROL] = "SCANNING_MODE",
+	[UVC_CT_AE_MODE_CONTROL] = "AE_MODE",
+	[UVC_CT_AE_PRIORITY_CONTROL] = "AE_PRIORITY",
+	[UVC_CT_EXPOSURE_TIME_ABSOLUTE_CONTROL] = "EXPOSURE_TIME_ABSOLUTE",
+	[UVC_CT_EXPOSURE_TIME_RELATIVE_CONTROL] = "EXPOSURE_TIME_RELATIVE",
+	[UVC_CT_FOCUS_ABSOLUTE_CONTROL] = "FOCUS_ABSOLUTE",
+	[UVC_CT_FOCUS_RELATIVE_CONTROL] = "FOCUS_RELATIVE",
+	[UVC_CT_FOCUS_AUTO_CONTROL] = "FOCUS_AUTO",
+	[UVC_CT_IRIS_ABSOLUTE_CONTROL] = "IRIS_ABSOLUTE",
+	[UVC_CT_IRIS_RELATIVE_CONTROL] = "IRIS_RELATIVE",
+	[UVC_CT_ZOOM_ABSOLUTE_CONTROL] = "ZOOM_ABSOLUTE",
+	[UVC_CT_ZOOM_RELATIVE_CONTROL] = "ZOOM_RELATIVE",
+	[UVC_CT_PANTILT_ABSOLUTE_CONTROL] = "PANTILT_ABSOLUTE",
+	[UVC_CT_PANTILT_RELATIVE_CONTROL] = "PANTILT_RELATIVE",
+	[UVC_CT_ROLL_ABSOLUTE_CONTROL] = "ROLL_ABSOLUTE",
+	[UVC_CT_ROLL_RELATIVE_CONTROL] = "ROLL_RELATIVE",
+	[UVC_CT_PRIVACY_CONTROL] = "PRIVACY",
+};
+
+static const char *ct_control_name(uint8_t cs)
+{
+    if (cs < ARRAY_SIZE(uvc_ct_control_names))
+        return uvc_ct_control_names[cs];
+    else
+        return "UNKNOWN";
+}
+
 struct uvc_device *uvc_open(const char *devname, struct uvc_stream *stream)
 {
 	struct uvc_device *dev;
@@ -108,11 +142,17 @@ struct uvc_device *uvc_open(const char *devname, struct uvc_stream *stream)
 		return NULL;
 	}
 
+	/* Initialize servo control for pan/tilt */
+	servo_control_init(NULL);  /* Uses default localhost:8080 */
+
 	return dev;
 }
 
 void uvc_close(struct uvc_device *dev)
 {
+	/* Cleanup servo control */
+	servo_control_cleanup();
+
 	v4l2_close(dev->vdev);
 	dev->vdev = NULL;
 
@@ -191,18 +231,132 @@ uvc_events_process_standard(struct uvc_device *dev,
 }
 
 static void
-uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t cs, uint8_t len,
-			   struct uvc_request_data *resp)
+uvc_events_process_control(struct uvc_device *dev, uint8_t req, uint8_t unit_id,
+			   uint8_t cs, uint8_t len, struct uvc_request_data *resp)
 {
-	printf("control request (req %s cs %s)\n", uvc_request_name(req), pu_control_name(cs));
-	(void)dev;
-
-	/*
-	 * Responding to controls is not currently implemented. As an interim
-	 * measure respond to say that both get and set operations are permitted.
-	 */
-	resp->data[0] = 0x03;
-	resp->length = len;
+	static struct uvc_pantilt_absolute pantilt_pos = {0, 0};
+	
+	(void)dev;  /* Unused for now, may be needed for future enhancements */
+	
+	/* Determine if this is Camera Terminal or Processing Unit */
+	/* Unit ID 1 is typically Camera Terminal, Unit ID 2 is Processing Unit */
+	/* This is a simplification - should really check configfs structure */
+	int is_camera_terminal = (unit_id == 1);
+	
+	if (is_camera_terminal) {
+		printf("Camera Terminal control request (req %s cs %s)\n",
+		       uvc_request_name(req), ct_control_name(cs));
+		fflush(stdout);
+		
+		/* Handle pan/tilt controls */
+		if (cs == UVC_CT_PANTILT_ABSOLUTE_CONTROL) {
+			switch (req) {
+			case UVC_SET_CUR:
+				/* Mark this control for the DATA phase */
+				dev->control = UVC_CTRL_CT_PANTILT_ABSOLUTE;
+				resp->length = 8;
+				printf("  Pan/Tilt SET_CUR - waiting for data phase\n");
+				fflush(stdout);
+				break;
+				
+			case UVC_GET_CUR:
+				/* Get current position */
+				servo_control_get_pantilt(&pantilt_pos);
+				memcpy(resp->data, &pantilt_pos, 8);
+				resp->length = 8;
+				printf("  Getting pan/tilt: pan=%d, tilt=%d\n",
+				       pantilt_pos.pan, pantilt_pos.tilt);
+				break;
+				
+			case UVC_GET_MIN:
+				/* Min: -180 degrees * 3600 = -648000 arc-seconds */
+				pantilt_pos.pan = -648000;
+				pantilt_pos.tilt = -648000;
+				memcpy(resp->data, &pantilt_pos, 8);
+				resp->length = 8;
+				break;
+				
+			case UVC_GET_MAX:
+				/* Max: +180 degrees * 3600 = 648000 arc-seconds */
+				pantilt_pos.pan = 648000;
+				pantilt_pos.tilt = 648000;
+				memcpy(resp->data, &pantilt_pos, 8);
+				resp->length = 8;
+				break;
+				
+			case UVC_GET_RES:
+				/* Resolution: 1 degree = 3600 arc-seconds */
+				pantilt_pos.pan = 3600;
+				pantilt_pos.tilt = 3600;
+				memcpy(resp->data, &pantilt_pos, 8);
+				resp->length = 8;
+				break;
+				
+			case UVC_GET_DEF:
+				/* Default: 0 degrees */
+				pantilt_pos.pan = 0;
+				pantilt_pos.tilt = 0;
+				memcpy(resp->data, &pantilt_pos, 8);
+				resp->length = 8;
+				break;
+				
+			case UVC_GET_INFO:
+				/* Supports GET and SET */
+				resp->data[0] = 0x03;
+				resp->length = 1;
+				break;
+				
+			default:
+				resp->data[0] = 0x00;
+				resp->length = len;
+				break;
+			}
+			return;
+		}
+		else if (cs == UVC_CT_PANTILT_RELATIVE_CONTROL) {
+			/* Handle relative pan/tilt */
+			struct uvc_pantilt_relative pantilt_rel;
+			
+			switch (req) {
+			case UVC_SET_CUR:
+				if (len == 4) {
+					memcpy(&pantilt_rel, resp->data, 4);
+					printf("  Relative pan/tilt: pan=%d, tilt=%d\n",
+					       pantilt_rel.pan, pantilt_rel.tilt);
+					servo_control_move_pantilt(&pantilt_rel);
+				}
+				resp->length = len;
+				break;
+				
+			case UVC_GET_INFO:
+				resp->data[0] = 0x03;  /* Supports GET and SET */
+				resp->length = 1;
+				break;
+				
+			default:
+				resp->data[0] = 0x00;
+				resp->length = len;
+				break;
+			}
+			return;
+		}
+		
+		/* Other CT controls - return default response */
+		resp->data[0] = 0x03;
+		resp->length = len;
+	}
+	else {
+		/* Processing Unit control */
+		printf("Processing Unit control request (req %s cs %s)\n",
+		       uvc_request_name(req), pu_control_name(cs));
+		
+		/*
+		 * Responding to PU controls is not currently implemented.
+		 * Respond to say that both get and set operations are permitted.
+		 */
+		resp->data[0] = 0x03;
+		resp->length = len;
+	}
 }
 
 static void
@@ -264,12 +418,14 @@ uvc_events_process_class(struct uvc_device *dev,
 			 struct uvc_request_data *resp)
 {
 	unsigned int interface = ctrl->wIndex & 0xff;
+	unsigned int unit_id = ctrl->wIndex >> 8;
 
 	if ((ctrl->bRequestType & USB_RECIP_MASK) != USB_RECIP_INTERFACE)
 		return;
 
 	if (interface == dev->fc->control.intf.bInterfaceNumber)
-		uvc_events_process_control(dev, ctrl->bRequest, ctrl->wValue >> 8, ctrl->wLength, resp);
+		uvc_events_process_control(dev, ctrl->bRequest, unit_id,
+					   ctrl->wValue >> 8, ctrl->wLength, resp);
 	else if (interface == dev->fc->streaming.intf.bInterfaceNumber)
 		uvc_events_process_streaming(dev, ctrl->bRequest, ctrl->wValue >> 8, resp);
 }
@@ -317,6 +473,17 @@ uvc_events_process_data(struct uvc_device *dev,
 		printf("setting commit control, length = %d\n", data->length);
 		target = &dev->commit;
 		break;
+
+	case UVC_CTRL_CT_PANTILT_ABSOLUTE:
+		printf("setting pan/tilt absolute control, length = %d\n", data->length);
+		if (data->length == 8) {
+			struct uvc_pantilt_absolute pantilt;
+			memcpy(&pantilt, data->data, 8);
+			printf("  Pan/Tilt DATA: pan=%d arc-sec, tilt=%d arc-sec\n",
+			       pantilt.pan, pantilt.tilt);
+			servo_control_set_pantilt(&pantilt);
+		}
+		return;
 
 	default:
 		printf("setting unknown control, length = %d\n", data->length);
@@ -397,9 +564,16 @@ static void uvc_events_process(void *d)
 
 	ret = ioctl(dev->vdev->fd, UVCIOC_SEND_RESPONSE, &resp);
 	if (ret < 0) {
-		printf("UVCIOC_SEND_RESPONSE failed: %s (%d)\n",
-		       strerror(errno), errno);
+		printf("UVCIOC_SEND_RESPONSE failed: %s (%d), length=%d\n",
+		       strerror(errno), errno, resp.length);
+		fflush(stdout);
 		return;
+	}
+	
+	/* Debug: log successful responses for control requests */
+	if (resp.length > 0 && (unsigned int)resp.length != (unsigned int)(-EL2HLT)) {
+		printf("USB response sent successfully (length=%d)\n", resp.length);
+		fflush(stdout);
 	}
 }
 
